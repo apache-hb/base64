@@ -185,113 +185,105 @@ codec_choose_arm (struct codec *codec)
 #endif
 }
 
-static bool
-codec_choose_x86 (struct codec *codec)
-{
-#ifdef BASE64_X86_SIMD
+#ifdef BASE64_X86
 
-	unsigned int eax, ebx = 0, ecx = 0, edx;
+static const int cpu_feature_flags[X86_FEATURE_LEVEL_COUNT] = {
+	[X86_FEATURE_LEVEL_NONE]   = 0,
+	[X86_FEATURE_LEVEL_SSSE3]  = BASE64_FORCE_SSSE3,
+	[X86_FEATURE_LEVEL_SSE41]  = BASE64_FORCE_SSE41,
+	[X86_FEATURE_LEVEL_SSE42]  = BASE64_FORCE_SSE42,
+	[X86_FEATURE_LEVEL_AVX]    = BASE64_FORCE_AVX,
+	[X86_FEATURE_LEVEL_AVX2]   = BASE64_FORCE_AVX2,
+	[X86_FEATURE_LEVEL_AVX512] = BASE64_FORCE_AVX512
+};
+
+int x86_get_cpu_feature_level (void)
+{
+	unsigned int eax, ebx, ecx, edx;
 	unsigned int max_level;
 
-	#ifdef _MSC_VER
+#ifdef _MSC_VER
 	int info[4];
 	__cpuidex(info, 0, 0);
 	max_level = info[0];
-	#else
+#else
 	max_level = __get_cpuid_max(0, NULL);
-	#endif
+#endif
 
-	#if HAVE_AVX512 || HAVE_AVX2 || HAVE_AVX
-	// Check for AVX/AVX2/AVX512 support:
-	// Checking for AVX requires 3 things:
-	// 1) CPUID indicates that the OS uses XSAVE and XRSTORE instructions
-	//    (allowing saving YMM registers on context switch)
-	// 2) CPUID indicates support for AVX
-	// 3) XGETBV indicates the AVX registers will be saved and restored on
-	//    context switch
-	//
-	// Note that XGETBV is only available on 686 or later CPUs, so the
-	// instruction needs to be conditionally run.
 	if (max_level >= 1) {
+		// Check for AVX/AVX2/AVX512 support:
+		// Checking for AVX requires 3 things:
+		// 1) CPUID indicates that the OS uses XSAVE and XRSTORE instructions
+		//    (allowing saving YMM registers on context switch)
+		// 2) CPUID indicates support for AVX
+		// 3) XGETBV indicates the AVX registers will be saved and restored on
+		//    context switch
+		//
+		// Note that XGETBV is only available on 686 or later CPUs, so the
+		// instruction needs to be conditionally run.
 		__cpuid_count(1, 0, eax, ebx, ecx, edx);
 		if (ecx & bit_XSAVE_XRSTORE) {
 			uint64_t xcr_mask;
 			xcr_mask = _xgetbv(_XCR_XFEATURE_ENABLED_MASK);
 			if ((xcr_mask & _XCR_XMM_AND_YMM_STATE_ENABLED_BY_OS) == _XCR_XMM_AND_YMM_STATE_ENABLED_BY_OS) { // check multiple bits at once
-				#if HAVE_AVX512
 				if (max_level >= 7 && ((xcr_mask & _AVX_512_ENABLED_BY_OS) == _AVX_512_ENABLED_BY_OS)) {
 					__cpuid_count(7, 0, eax, ebx, ecx, edx);
 					if ((ebx & bit_AVX512vl) && (ecx & bit_AVX512vbmi)) {
-						codec->enc = base64_stream_encode_avx512;
-						codec->dec = base64_stream_decode_avx512;
-						return true;
+						return X86_FEATURE_LEVEL_AVX512;
 					}
 				}
-				#endif
-				#if HAVE_AVX2
+
 				if (max_level >= 7) {
 					__cpuid_count(7, 0, eax, ebx, ecx, edx);
 					if (ebx & bit_AVX2) {
-						codec->enc = base64_stream_encode_avx2;
-						codec->dec = base64_stream_decode_avx2;
-						return true;
+						return X86_FEATURE_LEVEL_AVX2;
 					}
 				}
-				#endif
-				#if HAVE_AVX
+
 				__cpuid_count(1, 0, eax, ebx, ecx, edx);
 				if (ecx & bit_AVX) {
-					codec->enc = base64_stream_encode_avx;
-					codec->dec = base64_stream_decode_avx;
-					return true;
+					return X86_FEATURE_LEVEL_AVX;
 				}
-				#endif
 			}
 		}
-	}
-	#endif
 
-	#if HAVE_SSE42
-	// Check for SSE42 support:
-	if (max_level >= 1) {
 		__cpuid(1, eax, ebx, ecx, edx);
+
+		// Check for SSE42 support:
 		if (ecx & bit_SSE42) {
-			codec->enc = base64_stream_encode_sse42;
-			codec->dec = base64_stream_decode_sse42;
-			return true;
+			return X86_FEATURE_LEVEL_SSE42;
 		}
-	}
-	#endif
 
-	#if HAVE_SSE41
-	// Check for SSE41 support:
-	if (max_level >= 1) {
-		__cpuid(1, eax, ebx, ecx, edx);
+		// Check for SSE41 support:
 		if (ecx & bit_SSE41) {
-			codec->enc = base64_stream_encode_sse41;
-			codec->dec = base64_stream_decode_sse41;
-			return true;
+			return X86_FEATURE_LEVEL_SSE41;
 		}
-	}
-	#endif
 
-	#if HAVE_SSSE3
-	// Check for SSSE3 support:
-	if (max_level >= 1) {
-		__cpuid(1, eax, ebx, ecx, edx);
+		// Check for SSSE3 support:
 		if (ecx & bit_SSSE3) {
-			codec->enc = base64_stream_encode_ssse3;
-			codec->dec = base64_stream_decode_ssse3;
-			return true;
+			return X86_FEATURE_LEVEL_SSSE3;
 		}
 	}
-	#endif
+
+	return X86_FEATURE_LEVEL_NONE;
+}
+#endif // BASE64_X86
+
+static bool
+codec_choose_x86 (struct codec *codec)
+{
+#ifdef BASE64_X86_SIMD
+	int feature_level;
+
+	feature_level = x86_get_cpu_feature_level();
+	codec_choose_forced(codec, cpu_feature_flags[feature_level]);
+	return true;
 
 #else
 	(void)codec;
-#endif
 
 	return false;
+#endif // BASE64_X86_SIMD
 }
 
 void
